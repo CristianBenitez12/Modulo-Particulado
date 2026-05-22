@@ -1,0 +1,21 @@
+# Archivos temporales de KiCad
+*.lck
+_autosave-*
+*.bak
+
+# Carpetas de historial y backups
+.history/
+Modulo_Material_particulado-backups/
+
+# Archivos del sistema de Windows
+*.ini
+*.log
+*.tmp
+desktop.ini
+Thumbs.db
+
+# Archivos de usuario que no deben ir al repo
+*.pdf
+*.pptx
+*.docx
+*.lnk
