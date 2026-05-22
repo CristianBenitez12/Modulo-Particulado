@@ -211,11 +211,13 @@
       "zones_allow_external_fillets": false
     },
     "ipc2581": {
+      "bom_rev": "",
       "dist": "",
       "distpn": "",
       "internal_id": "",
       "mfg": "",
-      "mpn": ""
+      "mpn": "",
+      "sch_revision": ""
     },
     "layer_pairs": [],
     "layer_presets": [],
@@ -420,9 +422,11 @@
       "duplicate_sheet_names": "error",
       "endpoint_off_grid": "warning",
       "extra_units": "error",
+      "field_name_whitespace": "warning",
       "footprint_filter": "ignore",
       "footprint_link_issues": "warning",
       "four_way_junction": "ignore",
+      "ground_pin_not_ground": "warning",
       "hier_label_mismatch": "error",
       "isolated_pin_label": "warning",
       "label_dangling": "error",
@@ -447,6 +451,7 @@
       "similar_power": "warning",
       "simulation_model_issue": "ignore",
       "single_global_label": "ignore",
+      "stacked_pin_name": "warning",
       "unannotated": "error",
       "unconnected_wire_endpoint": "warning",
       "undefined_netclass": "error",
@@ -508,6 +513,10 @@
   },
   "schematic": {
     "annotate_start_num": 0,
+    "annotation": {
+      "method": 0,
+      "sort_order": 0
+    },
     "bom_export_filename": "${PROJECTNAME}.csv",
     "bom_fmt_presets": [],
     "bom_fmt_settings": {
@@ -579,6 +588,7 @@
       "sort_asc": true,
       "sort_field": "Referencia"
     },
+    "bus_aliases": {},
     "connection_grid_size": 50.0,
     "drawing": {
       "dashed_lines_dash_length_ratio": 12.0,
@@ -620,12 +630,20 @@
     "spice_save_all_voltages": false,
     "subpart_first_id": 65,
     "subpart_id_separator": 0,
-    "used_designators": "U1-2,R1-2,J1-5,#PWR3"
+    "top_level_sheets": [
+      {
+        "filename": "Modulo_Material_particulado.kicad_sch",
+        "name": "Modulo_Material_particulado",
+        "uuid": "e536bb35-46b4-4959-a4ba-8e179b2b0751"
+      }
+    ],
+    "used_designators": "#PWR2,#PWR4-7,J5,U3",
+    "variants": []
   },
   "sheets": [
     [
       "e536bb35-46b4-4959-a4ba-8e179b2b0751",
-      "Root"
+      "Modulo_Material_particulado"
     ]
   ],
   "text_variables": {},
@@ -634,5 +652,11 @@
     "meta": {
       "version": 0
     }
+  },
+  "tuning_profiles": {
+    "meta": {
+      "version": 0
+    },
+    "tuning_profiles_impedance_geometric": []
   }
 }
