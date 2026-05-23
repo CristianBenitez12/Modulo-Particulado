@@ -1,0 +1,321 @@
+name: kicad visual diff
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - '**/*.kicad_sch'
+      - '**/*.kicad_pro'
+
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - '**/*.kicad_sch'
+      - '**/*.kicad_pro'
+
+  workflow_dispatch:
+    inputs:
+      schematic_path:
+        description: 'Ruta relativa del .kicad_sch raíz (opcional)'
+        required: false
+        default: ''
+      base_ref:
+        description: 'Commit/ref base (opcional)'
+        required: false
+        default: ''
+      head_ref:
+        description: 'Commit/ref nuevo (opcional)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  KICAD_IMAGE: kicad/kicad:10.0-amd64
+  ARTIFACT_RETENTION_DAYS: 30
+
+jobs:
+  visual-diff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: checkout completo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: instalar dependencias python
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y python3-pip libcairo2 libffi-dev
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pillow cairosvg numpy
+
+      - name: resolver refs y metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZERO="0000000000000000000000000000000000000000"
+
+          INPUT_BASE="${{ github.event.inputs.base_ref }}"
+          INPUT_HEAD="${{ github.event.inputs.head_ref }}"
+          INPUT_SCH="${{ github.event.inputs.schematic_path }}"
+
+          if [ -n "$INPUT_HEAD" ]; then
+            HEAD_REF="$INPUT_HEAD"
+          else
+            HEAD_REF="${GITHUB_SHA}"
+          fi
+
+          if [ -n "$INPUT_BASE" ]; then
+            BASE_REF="$INPUT_BASE"
+          elif [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            BASE_REF="${{ github.event.pull_request.base.sha }}"
+          elif [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${{ github.event.before }}" != "$ZERO" ]; then
+            BASE_REF="${{ github.event.before }}"
+          else
+            BASE_REF="$(git rev-parse "${HEAD_REF}^" 2>/dev/null || true)"
+          fi
+
+          if [ -z "$BASE_REF" ]; then
+            echo "No se pudo resolver commit base"
+            exit 1
+          fi
+
+          git rev-parse "$BASE_REF" >/dev/null
+          git rev-parse "$HEAD_REF" >/dev/null
+
+          if [ "$BASE_REF" = "$HEAD_REF" ]; then
+            echo "BASE_REF y HEAD_REF son iguales: $BASE_REF"
+            exit 1
+          fi
+
+          CHANGED_SCHS="$(git diff --name-only "$BASE_REF" "$HEAD_REF" -- '*.kicad_sch' || true)"
+
+          if [ -n "$INPUT_SCH" ]; then
+            SCH="$INPUT_SCH"
+          else
+            mapfile -t PROS < <(git ls-files '*.kicad_pro')
+
+            if [ "${#PROS[@]}" -eq 1 ]; then
+              STEM="${PROS[0]%.kicad_pro}"
+              CANDIDATE="${STEM}.kicad_sch"
+              if git cat-file -e "${HEAD_REF}:${CANDIDATE}" 2>/dev/null; then
+                SCH="$CANDIDATE"
+              fi
+            fi
+
+            if [ -z "${SCH:-}" ]; then
+              SCH="$(printf '%s\n' "$CHANGED_SCHS" | sed '/^$/d' | head -n1 || true)"
+            fi
+
+            if [ -z "${SCH:-}" ]; then
+              mapfile -t SCHS < <(git ls-files '*.kicad_sch')
+              if [ "${#SCHS[@]}" -eq 1 ]; then
+                SCH="${SCHS[0]}"
+              fi
+            fi
+
+            if [ -z "${SCH:-}" ]; then
+              SCH="$(git ls-files '*.kicad_sch' | head -n1 || true)"
+            fi
+          fi
+
+          if [ -z "$SCH" ]; then
+            echo "No se encontró ningún .kicad_sch"
+            exit 1
+          fi
+
+          git cat-file -e "${BASE_REF}:${SCH}"
+          git cat-file -e "${HEAD_REF}:${SCH}"
+
+          INDEX="$(printf '%02d' "${GITHUB_RUN_NUMBER}")"
+          SAFE_NAME="$(basename "$SCH" .kicad_sch | tr ' /' '__')"
+
+          AUTHOR="$(git log -1 --format='%an <%ae>' "$HEAD_REF")"
+          COMMIT_DATE="$(git log -1 --date='format:%Y-%m-%d %H:%M:%S' --format='%ad' "$HEAD_REF")"
+          SHORT_SHA="$(git log -1 --format='%h' "$HEAD_REF")"
+          SUBJECT="$(git log -1 --format='%s' "$HEAD_REF" | tr '\n' ' ')"
+
+          {
+            echo "base_ref=$BASE_REF"
+            echo "head_ref=$HEAD_REF"
+            echo "schematic=$SCH"
+            echo "index=$INDEX"
+            echo "safe_name=$SAFE_NAME"
+            echo "author=$AUTHOR"
+            echo "commit_date=$COMMIT_DATE"
+            echo "short_sha=$SHORT_SHA"
+            echo "subject=$SUBJECT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: preparar worktrees y salidas
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf .tmp out
+          mkdir -p .tmp/base .tmp/head
+          mkdir -p out/base out/head out/final
+          mkdir -p "$RUNNER_TEMP/kicad-home-base" "$RUNNER_TEMP/kicad-home-head"
+
+          git worktree add --detach .tmp/base "${{ steps.meta.outputs.base_ref }}"
+          git worktree add --detach .tmp/head "${{ steps.meta.outputs.head_ref }}"
+
+      - name: renderizar base a svg
+        env:
+          SCH: ${{ steps.meta.outputs.schematic }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp-home \
+            -e XDG_CONFIG_HOME=/tmp-home/.config \
+            -e XDG_CACHE_HOME=/tmp-home/.cache \
+            -e XDG_DATA_HOME=/tmp-home/.local/share \
+            -v "$PWD/.tmp/base":/src \
+            -v "$PWD/out/base":/out \
+            -v "$RUNNER_TEMP/kicad-home-base:/tmp-home" \
+            -e SCH="$SCH" \
+            "$KICAD_IMAGE" \
+            sh -lc '
+              set -e
+              mkdir -p "$HOME/.config" "$HOME/.cache" "$HOME/.local/share"
+              kicad-cli --version
+              kicad-cli sch export svg --output /out "/src/$SCH"
+            '
+
+      - name: renderizar head a svg
+        env:
+          SCH: ${{ steps.meta.outputs.schematic }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp-home \
+            -e XDG_CONFIG_HOME=/tmp-home/.config \
+            -e XDG_CACHE_HOME=/tmp-home/.cache \
+            -e XDG_DATA_HOME=/tmp-home/.local/share \
+            -v "$PWD/.tmp/head":/src \
+            -v "$PWD/out/head":/out \
+            -v "$RUNNER_TEMP/kicad-home-head:/tmp-home" \
+            -e SCH="$SCH" \
+            "$KICAD_IMAGE" \
+            sh -lc '
+              set -e
+              mkdir -p "$HOME/.config" "$HOME/.cache" "$HOME/.local/share"
+              kicad-cli --version
+              kicad-cli sch export svg --output /out "/src/$SCH"
+            '
+
+      - name: verificar export svg
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_COUNT="$(find out/base -type f -name '*.svg' | wc -l | tr -d ' ')"
+          HEAD_COUNT="$(find out/head -type f -name '*.svg' | wc -l | tr -d ' ')"
+
+          echo "SVG base: $BASE_COUNT"
+          echo "SVG head: $HEAD_COUNT"
+
+          if [ "$BASE_COUNT" = "0" ]; then
+            echo "No se encontró ningún SVG base"
+            find out/base -maxdepth 5 -print || true
+            exit 1
+          fi
+
+          if [ "$HEAD_COUNT" = "0" ]; then
+            echo "No se encontró ningún SVG head"
+            find out/head -maxdepth 5 -print || true
+            exit 1
+          fi
+
+      - name: generar overview + changes-only + resumen
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OVERVIEW_PNG="out/final/${{ steps.meta.outputs.index }}-${{ steps.meta.outputs.safe_name }}-overview.png"
+          OVERVIEW_SVG="out/final/${{ steps.meta.outputs.index }}-${{ steps.meta.outputs.safe_name }}-overview.svg"
+          CHANGES_PNG="out/final/${{ steps.meta.outputs.index }}-${{ steps.meta.outputs.safe_name }}-changes-only.png"
+          CHANGES_SVG="out/final/${{ steps.meta.outputs.index }}-${{ steps.meta.outputs.safe_name }}-changes-only.svg"
+          SUMMARY_TXT="out/final/${{ steps.meta.outputs.index }}-${{ steps.meta.outputs.safe_name }}-summary.txt"
+          META_TXT="out/final/${{ steps.meta.outputs.index }}-${{ steps.meta.outputs.safe_name }}-meta.txt"
+
+          python3 .github/scripts/kicad_visual_diff.py \
+            --old-svg-dir out/base \
+            --new-svg-dir out/head \
+            --old-sch ".tmp/base/${{ steps.meta.outputs.schematic }}" \
+            --new-sch ".tmp/head/${{ steps.meta.outputs.schematic }}" \
+            --overview-png-out "$OVERVIEW_PNG" \
+            --overview-svg-out "$OVERVIEW_SVG" \
+            --changes-png-out "$CHANGES_PNG" \
+            --changes-svg-out "$CHANGES_SVG" \
+            --summary-out "$SUMMARY_TXT" \
+            --author "${{ steps.meta.outputs.author }}" \
+            --commit "${{ steps.meta.outputs.short_sha }}" \
+            --date "${{ steps.meta.outputs.commit_date }}" \
+            --message "${{ steps.meta.outputs.subject }}" \
+            --title "${{ steps.meta.outputs.schematic }}"
+
+          {
+            echo "schematic: ${{ steps.meta.outputs.schematic }}"
+            echo "base_ref:  ${{ steps.meta.outputs.base_ref }}"
+            echo "head_ref:  ${{ steps.meta.outputs.head_ref }}"
+            echo "author:    ${{ steps.meta.outputs.author }}"
+            echo "date:      ${{ steps.meta.outputs.commit_date }}"
+            echo "commit:    ${{ steps.meta.outputs.short_sha }}"
+            echo "message:   ${{ steps.meta.outputs.subject }}"
+            echo "index:     ${{ steps.meta.outputs.index }}"
+          } > "$META_TXT"
+
+          ls -lah out/final
+
+      - name: subir artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kicad-visual-diff-${{ steps.meta.outputs.index }}-${{ steps.meta.outputs.safe_name }}
+          path: out/final/
+          if-no-files-found: error
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+      - name: resumen
+        shell: bash
+        run: |
+          {
+            echo "## KiCad visual diff"
+            echo ""
+            echo "- esquemático: \`${{ steps.meta.outputs.schematic }}\`"
+            echo "- base: \`${{ steps.meta.outputs.base_ref }}\`"
+            echo "- head: \`${{ steps.meta.outputs.head_ref }}\`"
+            echo "- autor: \`${{ steps.meta.outputs.author }}\`"
+            echo "- fecha: \`${{ steps.meta.outputs.commit_date }}\`"
+            echo "- commit: \`${{ steps.meta.outputs.short_sha }}\`"
+            echo "- mensaje: \`${{ steps.meta.outputs.subject }}\`"
+            echo "- artifact: \`kicad-visual-diff-${{ steps.meta.outputs.index }}-${{ steps.meta.outputs.safe_name }}\`"
+            echo ""
+            echo "Incluye:"
+            echo "- overview contextual"
+            echo "- changes-only"
+            echo "- resumen textual automático"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: limpiar worktrees
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          git worktree remove .tmp/base --force 2>/dev/null || true
+          git worktree remove .tmp/head --force 2>/dev/null || true
+          rm -rf .tmp
